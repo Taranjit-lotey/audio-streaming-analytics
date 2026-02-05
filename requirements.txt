@@ -1,0 +1,2 @@
+# AWS SDK for Python - required for Kinesis streaming
+boto3>=1.26.0

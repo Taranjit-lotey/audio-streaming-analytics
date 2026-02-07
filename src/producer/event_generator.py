@@ -292,7 +292,7 @@ if __name__ == '__main__':
     parser.add_argument('--sample-count', type=int, default=100,
                         help='Number of events for sample file (default: 100)')
 
-    args = parser.
+    args = parser.parse_args()
 
     if args.sample_file:
         generate_sample_file(args.sample_count, args.sample_file)

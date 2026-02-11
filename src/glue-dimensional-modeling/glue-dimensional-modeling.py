@@ -1,6 +1,16 @@
 """
 Glue ETL Job - Transform raw audio events from S3 into Redshift star schema.
 
+This job runs hourly and:
+1. Reads new Parquet files from S3 (incremental via job bookmarks)
+2. Transforms raw events into dimensional model
+3. Loads into Redshift fact and dimension tables
+
+Run on AWS Glue with:
+- Glue version: 4.0
+- Worker type: G.1X
+- Number of workers: 2
+- Job bookmark: Enabled (for incremental processing)
 
 Author: Taran
 """
@@ -28,6 +38,74 @@ args = getResolvedOptions(sys.argv, [
     'redshift_schema',
     's3_temp_dir'
 ])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Configuration
+SOURCE_DATABASE = args['source_database']  # Glue catalog database
+SOURCE_TABLE = args['source_table']        # Glue catalog table (crawled from S3)
+REDSHIFT_CONNECTION = args['redshift_connection']
+REDSHIFT_DATABASE = args['redshift_database']
+REDSHIFT_SCHEMA = args['redshift_schema']
+S3_TEMP_DIR = args['s3_temp_dir']
+
+
+def read_source_data():
+    """
+    Read raw events from Glue catalog (backed by S3 Parquet).
+    
+    Job bookmarks ensure we only process new data since last run.
+    """
+    print(f"Reading from {SOURCE_DATABASE}.{SOURCE_TABLE}")
+    
+    dynamic_frame = glueContext.create_dynamic_frame.from_catalog(
+        database=SOURCE_DATABASE,
+        table_name=SOURCE_TABLE,
+        transformation_ctx="source_data"  # Required for job bookmarks
+    )
+    
+    df = dynamic_frame.toDF()
+    record_count = df.count()
+    print(f"Read {record_count:,} records from source")
+    
+    return df
+
+
+def transform_to_dim_date(df):
+    """
+    Create date dimension from events.
+    
+    SCD Type 1 - dates don't change, just insert new ones.
+    """
+    print("Building dim_date...")
+    
+    dim_date = df.select(
+        F.to_date('event_timestamp').alias('full_date')
+    ).distinct()
+    
+    dim_date = dim_date.withColumn('date_key', 
+        F.date_format('full_date', 'yyyyMMdd').cast('int')
+    ).withColumn('day_of_week',
+        F.dayofweek('full_date')
+    ).withColumn('day_name',
+        F.date_format('full_date', 'EEEE')
+    ).withColumn('month',
+        F.month('full_date')
+    ).withColumn('month_name',
+        F.date_format('full_date', 'MMMM')
+    ).withColumn('quarter',
+        F.quarter('full_date')
+    ).withColumn('year',
+        F.year('full_date')
+    ).withColumn('is_weekend',
+        F.when(F.dayofweek('full_date').isin([1, 7]), True).otherwise(False)
+    )
+    
+    return dim_date
 
 
 def transform_to_dim_tracks(df):
@@ -202,3 +280,58 @@ def upsert_dimension(df, table_name, key_column):
     
     # Note: In production, execute via Redshift Data API or psycopg2
     print(f"MERGE SQL for {table_name}:\n{merge_sql}")
+
+
+def main():
+    """Main ETL workflow."""
+    print("=" * 60)
+    print(f"Starting Audio Events ETL Job")
+    print(f"Timestamp: {datetime.utcnow().isoformat()}")
+    print("=" * 60)
+    
+    # Read source data (incremental via job bookmarks)
+    raw_events = read_source_data()
+    
+    if raw_events.count() == 0:
+        print("No new records to process. Exiting.")
+        job.commit()
+        return
+    
+    # Cache for multiple uses
+    raw_events.cache()
+    
+    # Build dimensions
+    dim_date = transform_to_dim_date(raw_events)
+    dim_tracks = transform_to_dim_tracks(raw_events)
+    dim_users = transform_to_dim_users(raw_events)
+    
+    # Build fact table
+    fact_listens = transform_to_fact_listens(
+        raw_events, dim_users, dim_tracks, dim_date
+    )
+    
+    # Write to Redshift
+    # Dimensions: upsert (handles SCD Type 1)
+    write_to_redshift(dim_date, 'dim_date', mode='append')
+    write_to_redshift(dim_tracks, 'dim_tracks', mode='append')
+    write_to_redshift(dim_users, 'dim_users', mode='append')
+    
+    # Fact: always append (immutable events)
+    write_to_redshift(fact_listens, 'fact_listens', mode='append')
+    
+    # Print summary
+    print("=" * 60)
+    print("ETL Summary:")
+    print(f"  dim_date records: {dim_date.count():,}")
+    print(f"  dim_tracks records: {dim_tracks.count():,}")
+    print(f"  dim_users records: {dim_users.count():,}")
+    print(f"  fact_listens records: {fact_listens.count():,}")
+    print("=" * 60)
+    
+    # Commit job (updates bookmark)
+    job.commit()
+    print("Job committed successfully")
+
+
+if __name__ == '__main__':
+    main()

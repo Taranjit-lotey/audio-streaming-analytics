@@ -1,0 +1,20 @@
+-- audio analytics queries
+-- various reporting queries for the team
+
+set search_path to audio_analytics;
+
+-- most skipped tracks - last 30 days
+select
+    t.title,
+    t.artist,
+    count(*) as skip_count,
+    round(avg(f.duration_ms)/1000.0, 1) as avg_sec_before_skip,
+    count(distinct f.user_key) as unique_skippers
+from fact_listens f
+join dim_tracks t on f.track_key = t.track_key
+join dim_date d on f.date_key = d.date_key
+where f.action = 'SKIP'
+  and d.full_date >= dateadd(month, -1, current_date)
+group by t.title, t.artist
+order by skip_count desc
+limit 10;

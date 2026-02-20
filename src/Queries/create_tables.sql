@@ -43,3 +43,61 @@ CREATE TABLE IF NOT EXISTS dim_tracks (
 DISTSTYLE ALL
 SORTKEY (artist, title);
 
+
+-- dim_users: User dimension
+-- Distribution: ALL (for fast joins with fact table)
+CREATE TABLE IF NOT EXISTS dim_users (
+    user_key        BIGINT          NOT NULL    ENCODE az64,
+    user_id         VARCHAR(50)     NOT NULL    ENCODE lzo,
+    subscription_tier VARCHAR(20)   DEFAULT 'FREE'      ENCODE lzo,
+    signup_date     DATE                        ENCODE az64,
+    region          VARCHAR(50)                 ENCODE lzo,
+    first_seen      TIMESTAMP                   ENCODE az64,
+    last_seen       TIMESTAMP                   ENCODE az64,
+    primary_device  VARCHAR(50)                 ENCODE lzo,
+    created_at      TIMESTAMP       DEFAULT GETDATE()   ENCODE az64,
+    updated_at      TIMESTAMP       DEFAULT GETDATE()   ENCODE az64,
+    PRIMARY KEY (user_key)
+)
+DISTSTYLE ALL
+SORTKEY (user_id);
+
+
+-- ============================================================================
+-- FACT TABLE
+-- ============================================================================
+
+-- fact_listens: Core fact table for listening events
+-- Distribution: KEY on user_key (enables efficient user-centric queries)
+-- Sort: Compound sort on event_timestamp for time-range queries
+CREATE TABLE IF NOT EXISTS fact_listens (
+    listen_key      BIGINT          NOT NULL    ENCODE az64,
+    user_key        BIGINT          NOT NULL    ENCODE az64,
+    track_key       BIGINT          NOT NULL    ENCODE az64,
+    date_key        INT             NOT NULL    ENCODE az64,
+    session_id      VARCHAR(50)     NOT NULL    ENCODE lzo,
+    action          VARCHAR(20)     NOT NULL    ENCODE lzo,  -- PLAY, PAUSE, SKIP, COMPLETE
+    duration_ms     INT             NOT NULL    ENCODE az64,
+    device_type     VARCHAR(30)     NOT NULL    ENCODE lzo,
+    event_timestamp TIMESTAMP       NOT NULL    ENCODE az64,
+    loaded_at       TIMESTAMP       DEFAULT GETDATE()   ENCODE az64,
+    PRIMARY KEY (listen_key)
+)
+DISTSTYLE KEY
+DISTKEY (user_key)
+COMPOUND SORTKEY (event_timestamp, user_key, action);
+
+
+-- ============================================================================
+-- FOREIGN KEY CONSTRAINTS (for documentation, not enforced)
+-- ============================================================================
+
+ALTER TABLE fact_listens ADD CONSTRAINT fk_user 
+    FOREIGN KEY (user_key) REFERENCES dim_users(user_key);
+
+ALTER TABLE fact_listens ADD CONSTRAINT fk_track 
+    FOREIGN KEY (track_key) REFERENCES dim_tracks(track_key);
+
+ALTER TABLE fact_listens ADD CONSTRAINT fk_date 
+    FOREIGN KEY (date_key) REFERENCES dim_date(date_key);
+

@@ -101,3 +101,66 @@ ALTER TABLE fact_listens ADD CONSTRAINT fk_track
 ALTER TABLE fact_listens ADD CONSTRAINT fk_date 
     FOREIGN KEY (date_key) REFERENCES dim_date(date_key);
 
+
+-- ============================================================================
+-- STAGING TABLES (for upsert operations)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS dim_users_staging (LIKE dim_users);
+CREATE TABLE IF NOT EXISTS dim_tracks_staging (LIKE dim_tracks);
+
+
+-- ============================================================================
+-- MATERIALIZED VIEWS (for common aggregations)
+-- ============================================================================
+
+-- Daily listening summary by user
+CREATE MATERIALIZED VIEW mv_daily_user_summary AS
+SELECT 
+    d.full_date,
+    u.user_id,
+    u.subscription_tier,
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN f.action = 'PLAY' THEN 1 ELSE 0 END) AS plays,
+    SUM(CASE WHEN f.action = 'SKIP' THEN 1 ELSE 0 END) AS skips,
+    SUM(CASE WHEN f.action = 'COMPLETE' THEN 1 ELSE 0 END) AS completes,
+    SUM(f.duration_ms) / 1000.0 / 60.0 AS total_minutes,
+    COUNT(DISTINCT f.track_key) AS unique_tracks,
+    COUNT(DISTINCT f.session_id) AS sessions
+FROM fact_listens f
+JOIN dim_users u ON f.user_key = u.user_key
+JOIN dim_date d ON f.date_key = d.date_key
+GROUP BY d.full_date, u.user_id, u.subscription_tier;
+
+
+-- Track performance summary
+CREATE MATERIALIZED VIEW mv_track_performance AS
+SELECT 
+    t.track_id,
+    t.title,
+    t.artist,
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN f.action = 'COMPLETE' THEN 1 ELSE 0 END) AS completions,
+    SUM(CASE WHEN f.action = 'SKIP' THEN 1 ELSE 0 END) AS skips,
+    ROUND(
+        100.0 * SUM(CASE WHEN f.action = 'SKIP' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0),
+        2
+    ) AS skip_rate,
+    AVG(f.duration_ms) / 1000.0 AS avg_listen_seconds,
+    COUNT(DISTINCT f.user_key) AS unique_listeners
+FROM fact_listens f
+JOIN dim_tracks t ON f.track_key = t.track_key
+GROUP BY t.track_id, t.title, t.artist;
+
+
+-- ============================================================================
+-- GRANTS
+-- ============================================================================
+
+-- Read access for BI tools
+GRANT USAGE ON SCHEMA audio_analytics TO GROUP bi_analysts;
+GRANT SELECT ON ALL TABLES IN SCHEMA audio_analytics TO GROUP bi_analysts;
+
+-- Write access for ETL
+GRANT ALL ON SCHEMA audio_analytics TO GROUP etl_jobs;
+GRANT ALL ON ALL TABLES IN SCHEMA audio_analytics TO GROUP etl_jobs;
